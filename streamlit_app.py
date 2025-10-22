@@ -1,18 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
 import time
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import io
-
-# Import our utility modules
-try:
-    from utils import SearchEngine, HighlightEngine, DataValidator, LengthFormatter
-except ImportError:
-    st.error("utils.py file not found. Please check if utils.py is in the same directory.")
-    st.stop()
 
 # Page configuration
 st.set_page_config(
@@ -57,35 +49,6 @@ st.markdown("""
         text-align: center;
     }
     
-    .source-highlight {
-        background-color: green;
-        color: white;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-    
-    .exact-match {
-        background-color: yellow;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-    
-    .diacritic-match {
-        background-color: lightblue;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-    
-    .cyrillic-match {
-        background-color: orange;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-    
-    .stDataFrame {
-        text-align: center;
-    }
-    
     .stButton > button {
         background-color: red;
         color: white;
@@ -116,36 +79,272 @@ if 'search_time' not in st.session_state:
 PAGE_SIZE = 10
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1O66GTEB2AfBWYEq0sDLusVkJk9gg1XpmZNJmmQkvtls/export?format=csv&gid=0"
 
-# Initialize engines
-search_engine = SearchEngine()
-highlight_engine = HighlightEngine()
-data_validator = DataValidator()
-length_formatter = LengthFormatter()
+# Utility functions
+def remove_diacritics(text: str) -> str:
+    """Remove diacritical marks from Latvian text"""
+    if not text:
+        return ""
+        
+    diacritics_map = {
+        'ā': 'a', 'č': 'c', 'ē': 'e', 'ģ': 'g', 'ī': 'i', 'ķ': 'k', 
+        'ļ': 'l', 'ņ': 'n', 'š': 's', 'ū': 'u', 'ž': 'z',
+        'Ā': 'A', 'Č': 'C', 'Ē': 'E', 'Ģ': 'G', 'Ī': 'I', 'Ķ': 'K',
+        'Ļ': 'L', 'Ņ': 'N', 'Š': 'S', 'Ū': 'U', 'Ž': 'Z',
+        'ś': 's', 'ṣ': 's', 'ṁ': 'm', 'ḍ': 'd', 'ṭ': 't', 
+        'ṇ': 'n', 'ṅ': 'n', 'ñ': 'n', 'ṛ': 'r', 'ḷ': 'l'
+    }
+    
+    result = text
+    for char, replacement in diacritics_map.items():
+        result = result.replace(char, replacement)
+    
+    return result
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+def transliterate(word: str) -> str:
+    """Transliterate Latin to Cyrillic"""
+    transliteration_map = {
+        "a": "а", "b": "б", "v": "в", "g": "г", "d": "д",
+        "e": "е", "yo": "ё", "zh": "ж", "z": "з", "i": "и",
+        "y": "й", "k": "к", "l": "л", "m": "м", "n": "н",
+        "o": "о", "p": "п", "r": "р", "s": "с", "t": "т",
+        "u": "у", "f": "ф", "h": "х", "ts": "ц", "ch": "ч",
+        "sh": "ш", "sch": "щ", "yu": "ю", "ya": "я", "j": "дж"
+    }
+    
+    result = []
+    i = 0
+    word_lower = word.lower()
+    
+    while i < len(word_lower):
+        found = False
+        for length in [3, 2, 1]:
+            if i + length <= len(word_lower):
+                substr = word_lower[i:i+length]
+                if substr in transliteration_map:
+                    result.append(transliteration_map[substr])
+                    i += length
+                    found = True
+                    break
+        
+        if not found:
+            result.append(word_lower[i])
+            i += 1
+    
+    return ''.join(result)
+
+def format_length(length) -> str:
+    """Format length field to match original display"""
+    if pd.isna(length) or length == "":
+        return ""
+    
+    length_str = str(length)
+    
+    if 'h' in length_str and 'min' in length_str:
+        return length_str
+    
+    if ':' in length_str:
+        parts = length_str.split(':')
+        if len(parts) >= 2:
+            try:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                if hours == 0:
+                    return f"{minutes}min"
+                else:
+                    return f"{hours}h {minutes:02d}min"
+            except ValueError:
+                return length_str
+    
+    return length_str
+
+def highlight_search_terms(text: str, search_terms: List[str]) -> str:
+    """Highlight search terms in text with different colors"""
+    if not search_terms or pd.isna(text):
+        return str(text)
+    
+    text = str(text)
+    result = text
+    
+    for term in search_terms:
+        term = term.strip()
+        if not term:
+            continue
+        
+        if term.startswith('@'):
+            source_term = term[1:].lower()
+            pattern = re.compile(f'({re.escape(source_term)})', re.IGNORECASE)
+            result = pattern.sub(r'<span style="background-color: green; color: white; padding: 2px 4px; border-radius: 3px;">\1</span>', result)
+            continue
+        
+        or_terms = [t.strip() for t in term.split('//') if t.strip()]
+        
+        for or_term in or_terms:
+            normalized_term = remove_diacritics(or_term.lower())
+            
+            exact_pattern = re.compile(f'({re.escape(or_term)})', re.IGNORECASE)
+            result = exact_pattern.sub(r'<span style="background-color: yellow; padding: 2px 4px; border-radius: 3px;">\1</span>', result)
+            
+            if normalized_term != or_term.lower():
+                diacritic_pattern = re.compile(f'({re.escape(normalized_term)})', re.IGNORECASE)
+                if '<span' not in result:
+                    result = diacritic_pattern.sub(r'<span style="background-color: lightblue; padding: 2px 4px; border-radius: 3px;">\1</span>', result)
+            
+            transliterated_term = transliterate(normalized_term)
+            if transliterated_term != normalized_term and not re.search('[a-zA-Z0-9]', transliterated_term):
+                cyrillic_pattern = re.compile(f'({re.escape(transliterated_term)})', re.IGNORECASE)
+                result = cyrillic_pattern.sub(r'<span style="background-color: orange; padding: 2px 4px; border-radius: 3px;">\1</span>', result)
+    
+    return result
+
+def parse_date_for_sorting(date_str) -> Tuple[int, int, int]:
+    """Parse date string for sorting"""
+    if pd.isna(date_str) or not date_str or str(date_str).lower() == 'unknown':
+        return (9999, 99, 99)
+    
+    date_str = str(date_str).strip()
+    
+    if '.' in date_str:
+        parts = date_str.split('.')
+        if len(parts) == 3:
+            try:
+                year = int(parts[0]) if parts[0] != 'xx' else 9999
+                month = int(parts[1]) if parts[1] != 'xx' else 99
+                day = int(parts[2]) if parts[2] != 'xx' else 99
+                return (year, month, day)
+            except (ValueError, IndexError):
+                pass
+    
+    return (9999, 99, 99)
+
+@st.cache_data(ttl=300)
 def load_spreadsheet_data() -> pd.DataFrame:
     """Load data from Google Sheets"""
     try:
         df = pd.read_csv(SPREADSHEET_URL)
         
-        # Validate and clean the dataframe using our utility
-        df = data_validator.validate_dataframe(df)
+        # Clean and standardize column names
+        df.columns = df.columns.str.strip()
+        
+        # Ensure required columns exist
+        required_columns = [
+            'Date', 'Type', 'Subtype', 'Nr.', 'Original file name', 
+            'Country', 'Lang.', 'Links', 'Dwnld.', 'Length', 'Source'
+        ]
+        
+        for col in required_columns:
+            if col not in df.columns:
+                df[col] = ""
+        
+        # Format length column
+        if 'Length' in df.columns:
+            df['Length'] = df['Length'].apply(format_length)
+        
+        # Fill NaN values
+        df = df.fillna("")
         
         return df
         
     except Exception as e:
         st.error(f"Error loading spreadsheet data: {str(e)}")
-        return pd.DataFrame()
+        
+        # Create sample data as fallback
+        sample_data = {
+            'Date': ['2023.12.25', '2023.11.15', '2023.10.01'],
+            'Type': ['Lecture', 'Seminar', 'Class'],
+            'Subtype': ['BG', 'SB', 'CC'],
+            'Nr.': ['001', '002', '003'],
+            'Original file name': ['Guru Tattva Krishna', 'Bhakti Yoga Prema', 'Spiritual Master Wisdom'],
+            'Country': ['Latvia', 'India', 'USA'],
+            'Lang.': ['LV', 'EN', 'EN'],
+            'Links': ['https://example.com/1', 'https://example.com/2', 'https://example.com/3'],
+            'Dwnld.': ['https://example.com/dl1', 'https://example.com/dl2', 'https://example.com/dl3'],
+            'Length': ['1h 30min', '45min', '2h 15min'],
+            'Source': ['ChaitanyaAcademy', 'ChaitanyaAcademyLive', 'BihariPrabhu']
+        }
+        return pd.DataFrame(sample_data)
+
+def search_data(search_term: str, df: pd.DataFrame) -> Tuple[pd.DataFrame, float, int]:
+    """Search through the dataframe based on search terms"""
+    start_time = time.time()
+    
+    if df.empty or not search_term.strip():
+        return pd.DataFrame(), 0.0, 0
+    
+    # Parse search terms
+    search_terms = [term.strip() for term in search_term.lower().split(';') if term.strip()]
+    source_terms = [term for term in search_terms if term.startswith('@')]
+    other_terms = [term for term in search_terms if not term.startswith('@')]
+    
+    # Start with all rows
+    mask = pd.Series([True] * len(df), index=df.index)
+    
+    # Apply source filtering
+    if source_terms:
+        source_mask = pd.Series([False] * len(df), index=df.index)
+        for source_term in source_terms:
+            source_value = source_term[1:].lower()
+            if 'Source' in df.columns:
+                source_mask |= df['Source'].astype(str).str.lower().str.contains(
+                    source_value, na=False, regex=False
+                )
+        mask &= source_mask
+    
+    # Apply other term filtering
+    if other_terms:
+        for term in other_terms:
+            term_mask = pd.Series([False] * len(df), index=df.index)
+            
+            or_terms = [t.strip() for t in term.split('//') if t.strip()]
+            
+            for or_term in or_terms:
+                normalized_term = remove_diacritics(or_term.lower())
+                transliterated_term = transliterate(normalized_term)
+                
+                search_columns = ['Date', 'Type', 'Subtype', 'Nr.', 'Original file name', 
+                                'Country', 'Lang.', 'Links', 'Dwnld.', 'Length']
+                
+                for col in search_columns:
+                    if col in df.columns:
+                        col_values = df[col].astype(str).str.lower()
+                        normalized_col_values = col_values.apply(remove_diacritics)
+                        
+                        term_mask |= normalized_col_values.str.contains(normalized_term, na=False, regex=False)
+                        term_mask |= normalized_col_values.str.contains(transliterated_term, na=False, regex=False)
+            
+            mask &= term_mask
+    
+    # Filter the dataframe
+    filtered_df = df[mask].copy()
+    
+    # Sort by date
+    if not filtered_df.empty and 'Date' in filtered_df.columns:
+        sort_keys = filtered_df['Date'].apply(parse_date_for_sorting)
+        sorted_indices = sorted(range(len(sort_keys)), 
+                              key=lambda i: sort_keys.iloc[i], 
+                              reverse=True)
+        filtered_df = filtered_df.iloc[sorted_indices].reset_index(drop=True)
+    
+    search_time = time.time() - start_time
+    total_results = len(filtered_df)
+    
+    return filtered_df, search_time, total_results
 
 def get_sources_list(df: pd.DataFrame) -> List[Dict[str, any]]:
     """Get list of unique sources with counts"""
-    return data_validator.get_sources_list(df)
-
-def create_hyperlink(url: str, text: str) -> str:
-    """Create HTML hyperlink"""
-    if pd.isna(url) or not url:
-        return text
-    return f'<a href="{url}" target="_blank">{text}</a>'
+    if df.empty or 'Source' not in df.columns:
+        return []
+    
+    valid_sources = df[df['Source'].astype(str).str.strip() != '']['Source']
+    source_counts = valid_sources.value_counts()
+    
+    sources = []
+    for source, count in source_counts.items():
+        sources.append({
+            'sourceName': str(source).strip(),
+            'count': int(count)
+        })
+    
+    return sources
 
 def display_results_table(df: pd.DataFrame, search_terms: List[str], page: int):
     """Display paginated results table"""
@@ -167,12 +366,12 @@ def display_results_table(df: pd.DataFrame, search_terms: List[str], page: int):
     display_df = page_df[['Date', 'Type', 'Subtype', 'Nr.', 'Original file name', 
                          'Country', 'Lang.', 'Links', 'Dwnld.', 'Length']].copy()
     
-    # Apply highlighting to text columns using our highlight engine
+    # Apply highlighting to text columns
     text_columns = ['Date', 'Type', 'Subtype', 'Nr.', 'Original file name', 'Country', 'Lang.']
     for col in text_columns:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(
-                lambda x: highlight_engine.highlight_search_terms(x, search_terms)
+                lambda x: highlight_search_terms(x, search_terms)
             )
     
     # Handle links with HTML
@@ -215,7 +414,7 @@ def main():
                 if not df.empty:
                     sources = get_sources_list(df)
                     st.subheader("📊 Sources List")
-                    for source in sources[:10]:  # Show top 10 sources
+                    for source in sources[:10]:
                         st.write(f"**@{source['sourceName']}** - {source['count']} files")
                     
                     if len(sources) > 10:
@@ -257,8 +456,7 @@ def main():
     if search_clicked or (search_input and search_input != st.session_state.search_term):
         if search_input.strip():
             with st.spinner("Searching for best results..."):
-                
-                filtered_df, search_time, total_results = search_engine.search_data(search_input, df)
+                filtered_df, search_time, total_results = search_data(search_input, df)
                 
                 # Update session state
                 st.session_state.search_results = filtered_df
