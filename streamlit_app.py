@@ -8,7 +8,11 @@ from typing import Dict, List, Optional, Tuple
 import io
 
 # Import our utility modules
-from utils import SearchEngine, HighlightEngine, DataValidator, LengthFormatter
+try:
+    from utils import SearchEngine, HighlightEngine, DataValidator, LengthFormatter
+except ImportError:
+    st.error("utils.py file not found. Please check if utils.py is in the same directory.")
+    st.stop()
 
 # Page configuration
 st.set_page_config(
