@@ -65,7 +65,7 @@ st.markdown("""
 
 # Initialize session state
 if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
+    st.session_state.search_results = pd.DataFrame()
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 1
 if 'search_term' not in st.session_state:
