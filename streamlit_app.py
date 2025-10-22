@@ -387,7 +387,7 @@ def display_results_table(df: pd.DataFrame, search_terms: List[str], page: int):
     
     # Display table with clickable links
     for idx, row in display_df.iterrows():
-    cols = st.columns([1, 1, 1, 1, 3, 1, 1, 1, 1, 1])
+        cols = st.columns([1, 1, 1, 1, 3, 1, 1, 1, 1, 1])
     
     with cols[0]: st.write(row['Date'])
     with cols[1]: st.write(row['Type']) 
