@@ -385,8 +385,24 @@ def display_results_table(df: pd.DataFrame, search_terms: List[str], page: int):
             lambda x: f'<a href="{x}" target="_blank">Mp3</a>' if x else ''
         )
     
-    # Display table
-    st.markdown(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    # Display table with clickable links
+    for idx, row in display_df.iterrows():
+    cols = st.columns([1, 1, 1, 1, 3, 1, 1, 1, 1, 1])
+    
+    with cols[0]: st.write(row['Date'])
+    with cols[1]: st.write(row['Type']) 
+    with cols[2]: st.write(row['Subtype'])
+    with cols[3]: st.write(row['Nr.'])
+    with cols[4]: st.markdown(row['Original file name'], unsafe_allow_html=True)
+    with cols[5]: st.write(row['Country'])
+    with cols[6]: st.write(row['Lang.'])
+    with cols[7]: 
+        if row['Links']:
+            st.link_button("Link", row['Links'])
+    with cols[8]:
+        if row['Dwnld.']:
+            st.link_button("Mp3", row['Dwnld.'])
+    with cols[9]: st.write(row['Length'])
 
 def main():
     """Main application function"""
