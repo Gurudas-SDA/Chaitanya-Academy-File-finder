@@ -87,14 +87,27 @@ SPREADSHEET_XLSX_URL = "https://docs.google.com/spreadsheets/d/1O66GTEB2AfBWYEq0
 
 def extract_url_from_hyperlink_formula(formula_text):
     """
-    Extracts URL from HYPERLINK formula for enhanced link functionality
+    Extracts URL from HYPERLINK formula - improved version
     """
     if not formula_text or not isinstance(formula_text, str):
         return None
-    pattern = r'=HYPERLINK\("([^"]+)"'
-    match = re.search(pattern, formula_text)
-    if match:
-        return match.group(1)
+    
+    # Method 1: Standard HYPERLINK formula
+    pattern1 = r'=HYPERLINK\("([^"]+)"'
+    match1 = re.search(pattern1, formula_text, re.IGNORECASE)
+    if match1:
+        return match1.group(1)
+    
+    # Method 2: HYPERLINK with single quotes
+    pattern2 = r"=HYPERLINK\('([^']+)'"
+    match2 = re.search(pattern2, formula_text, re.IGNORECASE)
+    if match2:
+        return match2.group(1)
+    
+    # Method 3: Direct URL (if cell contains full URL)
+    if formula_text.startswith('http'):
+        return formula_text
+    
     return None
 
 @st.cache_data(ttl=300)
@@ -154,19 +167,61 @@ def load_spreadsheet_data() -> pd.DataFrame:
                     extracted_mp3 = []
                     for row in range(2, min(ws.max_row + 1, len(df) + 2)):
                         cell = ws.cell(row=row, column=dwnld_col)
-                        url = extract_url_from_hyperlink_formula(str(cell.value))
+                        cell_value = cell.value
+                        
+                        # Try multiple ways to get MP3 URL
+                        url = None
+                        
+                        # Method 1: Extract from HYPERLINK formula
+                        if cell_value and isinstance(cell_value, str):
+                            url = extract_url_from_hyperlink_formula(cell_value)
+                        
+                        # Method 2: Check if cell has hyperlink property
+                        if not url and cell.hyperlink:
+                            url = cell.hyperlink.target
+                        
+                        # Method 3: If it's just "Mp3" text, we need the actual hyperlink
+                        if not url and cell_value and str(cell_value).strip().lower() in ['mp3', 'audio']:
+                            # This means there should be a hyperlink but we're not getting it
+                            # Try to get from hyperlink property
+                            if hasattr(cell, 'hyperlink') and cell.hyperlink:
+                                url = cell.hyperlink.target
+                        
                         extracted_mp3.append(url)
+                    
                     df['Processed_Dwnld'] = extracted_mp3[:len(df)]
+                    
+                    # Debug: Check how many we actually extracted
+                    actual_mp3_count = sum(1 for x in extracted_mp3 if x and str(x).startswith('http'))
+                    if hasattr(st, 'sidebar'):
+                        if actual_mp3_count < len(df) * 0.9:  # If we got less than 90%
+                            st.sidebar.warning(f"⚠️ Only found {actual_mp3_count} MP3 links out of {len(df)} records. Some may be missing hyperlinks.")
                 
                 # Cleanup
                 os.unlink(tmp_filename)
                 
-                # Show stats
+                # Show detailed stats
                 youtube_count = df['Processed_Links'].notna().sum() if 'Processed_Links' in df.columns else 0
                 mp3_count = df['Processed_Dwnld'].notna().sum() if 'Processed_Dwnld' in df.columns else 0
+                total_rows = len(df)
                 
                 if hasattr(st, 'sidebar'):
                     st.sidebar.success(f"✅ XLSX: {youtube_count} YouTube, {mp3_count} MP3 links extracted!")
+                    st.sidebar.info(f"📊 Total rows: {total_rows}")
+                    
+                    # Show percentage
+                    if total_rows > 0:
+                        mp3_percentage = (mp3_count / total_rows) * 100
+                        st.sidebar.metric("MP3 Coverage", f"{mp3_percentage:.1f}%")
+                        
+                        if mp3_percentage < 90:
+                            st.sidebar.error(f"❌ Missing {total_rows - mp3_count} MP3 links!")
+                            # Show some debug info
+                            if 'Dwnld.' in df.columns:
+                                dwnld_sample = df['Dwnld.'].head(5).tolist()
+                                st.sidebar.text("Sample Dwnld. values:")
+                                for i, val in enumerate(dwnld_sample):
+                                    st.sidebar.text(f"{i+1}: {str(val)[:50]}...")
                 
                 return df
                 
