@@ -7,6 +7,9 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import openpyxl
 from openpyxl import load_workbook
+import requests
+import tempfile
+import os
 
 # Page configuration
 st.set_page_config(
@@ -80,6 +83,7 @@ if 'search_time' not in st.session_state:
 # Configuration constants
 PAGE_SIZE = 10
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1O66GTEB2AfBWYEq0sDLusVkJk9gg1XpmZNJmmQkvtls/export?format=csv&gid=0"
+SPREADSHEET_XLSX_URL = "https://docs.google.com/spreadsheets/d/1O66GTEB2AfBWYEq0sDLusVkJk9gg1XpmZNJmmQkvtls/export?format=xlsx&gid=0"
 
 def extract_url_from_hyperlink_formula(formula_text):
     """
@@ -96,14 +100,84 @@ def extract_url_from_hyperlink_formula(formula_text):
 @st.cache_data(ttl=300)
 def load_spreadsheet_data() -> pd.DataFrame:
     """
-    Enhanced version that loads Google Sheets data with better link processing
+    Enhanced version that loads Google Sheets data with hyperlink extraction
     """
     try:
+        # First try XLSX to get hyperlinks
+        try:
+            import requests
+            import tempfile
+            import os
+            
+            # Download XLSX file
+            response = requests.get(SPREADSHEET_XLSX_URL)
+            if response.status_code == 200:
+                # Save to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                    tmp_file.write(response.content)
+                    tmp_filename = tmp_file.name
+                
+                # Load with pandas for basic data
+                df = pd.read_excel(tmp_filename)
+                
+                # Load with openpyxl to extract hyperlinks
+                wb = load_workbook(tmp_filename, data_only=False)
+                ws = wb.active
+                
+                # Find columns
+                links_col = None
+                dwnld_col = None
+                for col in range(1, ws.max_column + 1):
+                    cell_value = ws.cell(row=1, column=col).value
+                    if cell_value == 'Links':
+                        links_col = col
+                    elif cell_value == 'Dwnld.':
+                        dwnld_col = col
+                
+                # Extract URLs from HYPERLINK formulas
+                if links_col and 'Links' in df.columns:
+                    extracted_links = []
+                    for row in range(2, min(ws.max_row + 1, len(df) + 2)):
+                        cell = ws.cell(row=row, column=links_col)
+                        url = extract_url_from_hyperlink_formula(str(cell.value))
+                        if not url and 'Direct URL' in df.columns:
+                            try:
+                                direct_url = df.loc[row-2, 'Direct URL']
+                                if pd.notna(direct_url):
+                                    url = direct_url
+                            except:
+                                pass
+                        extracted_links.append(url)
+                    df['Processed_Links'] = extracted_links[:len(df)]
+                
+                if dwnld_col and 'Dwnld.' in df.columns:
+                    extracted_mp3 = []
+                    for row in range(2, min(ws.max_row + 1, len(df) + 2)):
+                        cell = ws.cell(row=row, column=dwnld_col)
+                        url = extract_url_from_hyperlink_formula(str(cell.value))
+                        extracted_mp3.append(url)
+                    df['Processed_Dwnld'] = extracted_mp3[:len(df)]
+                
+                # Cleanup
+                os.unlink(tmp_filename)
+                
+                # Show stats
+                youtube_count = df['Processed_Links'].notna().sum() if 'Processed_Links' in df.columns else 0
+                mp3_count = df['Processed_Dwnld'].notna().sum() if 'Processed_Dwnld' in df.columns else 0
+                
+                if hasattr(st, 'sidebar'):
+                    st.sidebar.success(f"✅ XLSX: {youtube_count} YouTube, {mp3_count} MP3 links extracted!")
+                
+                return df
+                
+        except Exception as xlsx_error:
+            st.sidebar.warning(f"XLSX failed: {str(xlsx_error)}")
+        
+        # Fallback to CSV if XLSX fails
         df = pd.read_csv(SPREADSHEET_URL)
         
-        # Process Links column for better YouTube link handling
+        # Process Links column for YouTube
         if 'Links' in df.columns and 'Direct URL' in df.columns:
-            # Use Direct URL as fallback for Links if Links is just "YouTube"
             df['Processed_Links'] = df.apply(lambda row: 
                 row['Direct URL'] if (pd.notna(row['Direct URL']) and 
                                     (pd.isna(row['Links']) or str(row['Links']).strip().lower() == 'youtube'))
@@ -111,11 +185,16 @@ def load_spreadsheet_data() -> pd.DataFrame:
         else:
             df['Processed_Links'] = df.get('Links', '')
         
-        # Process Dwnld column for MP3 links (keep original logic)
+        # For CSV, we can't get real MP3 links, just show what we have
         if 'Dwnld.' in df.columns:
-            df['Processed_Dwnld'] = df['Dwnld.']
+            df['Processed_Dwnld'] = df['Dwnld.'].fillna('')
+        else:
+            df['Processed_Dwnld'] = ''
+        
+        st.sidebar.info("ℹ️ Using CSV fallback - MP3 links may be limited")
         
         return df
+        
     except Exception as e:
         st.error(f"Error loading spreadsheet: {e}")
         return pd.DataFrame()
@@ -307,11 +386,19 @@ def create_enhanced_link(url, text, link_type="video"):
     """
     Creates enhanced clickable links with better styling
     """
-    if not url or pd.isna(url) or str(url).strip() == '':
+    if not url or pd.isna(url):
         return ''
     
-    url = str(url).strip()
-    if not url.startswith('http'):
+    url_str = str(url).strip()
+    if url_str == '' or url_str.lower() in ['nan', 'none', 'null']:
+        return ''
+    
+    # For CSV data, we might get the display text instead of URL
+    # Check if this looks like a URL
+    if not url_str.startswith('http'):
+        # This might be just display text like "Mp3" - we need to show it differently
+        if link_type == "audio" and url_str.lower() in ['mp3', 'audio']:
+            return f'<span style="color: #666; font-size: 12px;">🎵 {url_str}</span>'
         return ''
     
     # Enhanced styling based on link type
@@ -322,7 +409,7 @@ def create_enhanced_link(url, text, link_type="video"):
         style = 'background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; text-decoration: none; font-size: 12px;'
         icon = '🎵'
     
-    return f'<a href="{url}" target="_blank" style="{style}">{icon} {text}</a>'
+    return f'<a href="{url_str}" target="_blank" style="{style}">{icon} {text}</a>'
 
 def display_results_table(df: pd.DataFrame, search_terms: List[str], page: int):
     if df.empty:
